@@ -3,20 +3,31 @@
 import { useRef, useEffect, useCallback, useState } from 'react';
 import { Polyline, Point, Tool, PlacedLabel } from '@/lib/types';
 import { distanceToPolyline } from '@/lib/geometry';
-import { drawScene, SCENE_BG } from '@/lib/renderScene';
+import { drawScene, SCENE_BG, ColorMode } from '@/lib/renderScene';
+import {
+  Viewport, worldToScreen, screenToWorld, transformPolylines, zoomAt,
+} from '@/lib/viewport';
 
 interface MapCanvasProps {
-  polylines: Polyline[];
-  placedLabels: PlacedLabel[];
+  polylines: Polyline[];          // в МИРОВЫХ координатах
+  placedLabels: PlacedLabel[];    // в ЭКРАННЫХ координатах
   tool: Tool;
   selectedId: string | null;
   currentColor: string;
   currentStep: number;
   currentLineWidth: number;
+  viewport: Viewport;
+  showGrid: boolean;
+  fontSize: number;
+  lineWidthOverride?: number;
+  colorMode: ColorMode;
+  singleColor: string;
   onPolylineAdded: (p: Polyline) => void;
   onPolylineSelected: (id: string | null) => void;
   onPolylineDeleted: (id: string) => void;
   onCanvasReady?: (canvas: HTMLCanvasElement | null) => void;
+  onViewportChange: (vp: Viewport) => void;
+  onCanvasSize?: (w: number, h: number) => void;
 }
 
 const DRAW_DASH: number[] = [6, 4];
@@ -29,23 +40,31 @@ export default function MapCanvas({
   currentColor,
   currentStep,
   currentLineWidth,
+  viewport,
+  showGrid,
+  fontSize,
+  lineWidthOverride,
+  colorMode,
+  singleColor,
   onPolylineAdded,
   onPolylineSelected,
   onPolylineDeleted,
   onCanvasReady,
+  onViewportChange,
+  onCanvasSize,
 }: MapCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const [drawing, setDrawing] = useState<Point[]>([]);
+  const [drawingWorld, setDrawingWorld] = useState<Point[]>([]);
   const [mouse, setMouse] = useState<Point | null>(null);
+  const [pan, setPan] = useState<{ startScreen: Point; startVp: Viewport } | null>(null);
 
-  // Прокидываем ссылку на canvas в родителя, чтобы можно было экспортировать в PDF
   useEffect(() => {
     onCanvasReady?.(canvasRef.current);
     return () => onCanvasReady?.(null);
   }, [onCanvasReady]);
 
-  // ─── рисование ───────────────────────────────────────────────────────────────
+  // ─── Render ────────────────────────────────────────────────────────────────
   const render = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -55,89 +74,95 @@ export default function MapCanvas({
     const W = canvas.width;
     const H = canvas.height;
 
-    // Используем общую функцию рендера сцены (как и при экспорте в PDF)
+    // Полилинии в экранных координатах
+    const screenPolylines = transformPolylines(polylines, viewport);
+
     drawScene(ctx, {
       sceneWidth: W,
       sceneHeight: H,
       pixelRatio: 1,
-      polylines,
+      polylines: screenPolylines,
       placedLabels,
-      showGrid: true,
+      showGrid,
       background: SCENE_BG,
       selectedId,
+      fontSize,
+      lineWidthOverride,
+      colorMode,
+      singleColor,
     });
 
-    // ── Превью рисуемой ломаной ───────────────────────────────────────────────
-    if (tool === 'draw' && drawing.length > 0) {
+    // Превью рисуемой ломаной
+    if (tool === 'draw' && drawingWorld.length > 0) {
       ctx.beginPath();
       ctx.strokeStyle = currentColor;
       ctx.lineWidth = currentLineWidth;
       ctx.setLineDash(DRAW_DASH);
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
-      ctx.moveTo(drawing[0].x, drawing[0].y);
-      for (let i = 1; i < drawing.length; i++) ctx.lineTo(drawing[i].x, drawing[i].y);
+      const screenPts = drawingWorld.map((p) => worldToScreen(p, viewport));
+      ctx.moveTo(screenPts[0].x, screenPts[0].y);
+      for (let i = 1; i < screenPts.length; i++) ctx.lineTo(screenPts[i].x, screenPts[i].y);
       if (mouse) ctx.lineTo(mouse.x, mouse.y);
       ctx.stroke();
       ctx.setLineDash([]);
 
-      for (const p of drawing) {
+      for (const p of screenPts) {
         ctx.beginPath();
         ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
         ctx.fillStyle = currentColor;
         ctx.fill();
       }
-
-      // Подсказка
-      if (drawing.length >= 2 && mouse) {
-        ctx.font = '12px Arial';
-        ctx.fillStyle = '#475569';
-        ctx.textAlign = 'left';
-        ctx.fillText('Двойной клик — завершить', mouse.x + 12, mouse.y - 8);
-      }
     }
-  }, [polylines, placedLabels, tool, selectedId, drawing, mouse, currentColor, currentLineWidth]);
+  }, [polylines, placedLabels, tool, selectedId, drawingWorld, mouse, currentColor, currentLineWidth, viewport, showGrid, fontSize, lineWidthOverride, colorMode, singleColor]);
 
   useEffect(() => { render(); }, [render]);
 
-  // ─── ResizeObserver ───────────────────────────────────────────────────────────
+  // ─── ResizeObserver: подгоняем canvas под контейнер ───────────────────────
+  // Зависимостей быть не должно — observer создаём один раз.
   useEffect(() => {
     const canvas = canvasRef.current;
     const container = containerRef.current;
     if (!canvas || !container) return;
 
-    const ro = new ResizeObserver(() => {
-      canvas.width = container.clientWidth;
-      canvas.height = container.clientHeight;
-      render();
-    });
+    const apply = () => {
+      const w = container.clientWidth;
+      const h = container.clientHeight;
+      if (canvas.width !== w) canvas.width = w;
+      if (canvas.height !== h) canvas.height = h;
+      onCanvasSize?.(w, h);
+    };
+    const ro = new ResizeObserver(apply);
     ro.observe(container);
-    canvas.width = container.clientWidth;
-    canvas.height = container.clientHeight;
+    apply();
     return () => ro.disconnect();
-  }, [render]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  // ─── Получить координаты клика ────────────────────────────────────────────
-  function getPos(e: React.MouseEvent<HTMLCanvasElement>): Point {
+  // ─── Координаты мыши ────────────────────────────────────────────────────────
+  function getScreenPos(e: React.MouseEvent | React.WheelEvent): Point {
     const r = canvasRef.current!.getBoundingClientRect();
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   }
 
+  // ─── Клик ───────────────────────────────────────────────────────────────────
   function handleClick(e: React.MouseEvent<HTMLCanvasElement>) {
-    // Двойной клик обрабатывается в onDoubleClick — игнорируем здесь при count>1
     if (e.detail > 1) return;
-    const pos = getPos(e);
+    if (pan) return;
+    const screen = getScreenPos(e);
 
     if (tool === 'draw') {
-      setDrawing((prev) => [...prev, pos]);
+      setDrawingWorld((prev) => [...prev, screenToWorld(screen, viewport)]);
       return;
     }
 
-    // Найти ближайшую ломаную
+    // Поиск ближайшей ломаной — переводим точку в мир и считаем расстояние в мировых единицах
+    const world = screenToWorld(screen, viewport);
+    const thresholdWorld = 10 / viewport.scale;
     let closestId: string | null = null;
-    let minD = 10;
+    let minD = thresholdWorld;
     for (const pl of polylines) {
-      const d = distanceToPolyline(pos, pl.points);
+      const d = distanceToPolyline(world, pl.points);
       if (d < minD) { minD = d; closestId = pl.id; }
     }
 
@@ -145,24 +170,49 @@ export default function MapCanvas({
     if (tool === 'delete' && closestId) onPolylineDeleted(closestId);
   }
 
-  function handleDoubleClick(_e: React.MouseEvent<HTMLCanvasElement>) {
+  function handleDoubleClick() {
     if (tool !== 'draw') return;
-    if (drawing.length < 2) { setDrawing([]); return; }
+    if (drawingWorld.length < 2) { setDrawingWorld([]); return; }
 
     onPolylineAdded({
       id: `pl-${Date.now()}`,
-      points: drawing,
+      points: drawingWorld,
       label: `Изолиния ${polylines.length + 1}`,
       color: currentColor,
       step: currentStep,
       direction: 'forward',
       lineWidth: currentLineWidth,
     });
-    setDrawing([]);
+    setDrawingWorld([]);
   }
 
   function handleMouseMove(e: React.MouseEvent<HTMLCanvasElement>) {
-    setMouse(getPos(e));
+    const screen = getScreenPos(e);
+    setMouse(screen);
+    if (pan) {
+      onViewportChange({
+        scale: pan.startVp.scale,
+        panX: pan.startVp.panX + (screen.x - pan.startScreen.x),
+        panY: pan.startVp.panY + (screen.y - pan.startScreen.y),
+      });
+    }
+  }
+
+  // Пан правой/средней кнопкой
+  function handleMouseDown(e: React.MouseEvent<HTMLCanvasElement>) {
+    if (e.button === 1 || e.button === 2) {
+      e.preventDefault();
+      setPan({ startScreen: getScreenPos(e), startVp: viewport });
+    }
+  }
+  function handleMouseUp() { setPan(null); }
+  function handleContextMenu(e: React.MouseEvent) { e.preventDefault(); }
+
+  // Зум колесом
+  function handleWheel(e: React.WheelEvent<HTMLCanvasElement>) {
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+    onViewportChange(zoomAt(viewport, getScreenPos(e), factor));
   }
 
   const cursorMap: Record<Tool, string> = {
@@ -170,21 +220,26 @@ export default function MapCanvas({
     select: 'pointer',
     delete: 'not-allowed',
   };
+  const cursor = pan ? 'grabbing' : cursorMap[tool];
 
   return (
     <div ref={containerRef} className="relative w-full h-full">
       <canvas
         ref={canvasRef}
-        className="block w-full h-full"
-        style={{ cursor: cursorMap[tool] }}
+        className="block w-full h-full select-none"
+        style={{ cursor }}
         onClick={handleClick}
         onDoubleClick={handleDoubleClick}
         onMouseMove={handleMouseMove}
-        onMouseLeave={() => setMouse(null)}
+        onMouseDown={handleMouseDown}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={() => { setMouse(null); setPan(null); }}
+        onContextMenu={handleContextMenu}
+        onWheel={handleWheel}
       />
-      {drawing.length === 0 && tool === 'draw' && (
+      {drawingWorld.length === 0 && tool === 'draw' && polylines.length === 0 && (
         <div className="absolute bottom-3 left-1/2 -translate-x-1/2 bg-white/80 text-slate-600 text-xs px-3 py-1 rounded-full shadow">
-          Кликайте для добавления точек · Двойной клик — завершить ломаную
+          Кликайте для добавления точек · Двойной клик — завершить · ПКМ/средняя — панорама · Колесо — зум
         </div>
       )}
     </div>

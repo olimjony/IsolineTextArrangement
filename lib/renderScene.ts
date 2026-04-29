@@ -1,6 +1,8 @@
 import { Polyline, PlacedLabel } from './types';
 import { FONT_SIZE, FONT_FAMILY } from './labelPlacement';
 
+export type ColorMode = 'rainbow' | 'single';
+
 export const SCENE_BG = '#f1f5f9';
 export const GRID_COLOR = '#cbd5e1';
 export const SELECT_COLOR = '#f97316';
@@ -14,6 +16,13 @@ export interface SceneOptions {
   showGrid: boolean;
   background: string;
   selectedId?: string | null;
+  /** Размер шрифта подписи (px). Если не задан, используется FONT_SIZE. */
+  fontSize?: number;
+  /** Принудительная толщина линий — переопределяет polyline.lineWidth. */
+  lineWidthOverride?: number;
+  /** Если 'single' и задан singleColor — все ломаные и подписи одного цвета. */
+  colorMode?: ColorMode;
+  singleColor?: string;
 }
 
 /**
@@ -51,8 +60,15 @@ export function drawScene(ctx: CanvasRenderingContext2D, opts: SceneOptions): vo
   if (!offCtx) return;
   offCtx.scale(pixelRatio, pixelRatio);
 
+  const useSingle = opts.colorMode === 'single' && !!opts.singleColor;
   for (const pl of opts.polylines) {
-    drawPolylineRaw(offCtx, pl, pl.id === opts.selectedId);
+    drawPolylineRaw(
+      offCtx,
+      pl,
+      pl.id === opts.selectedId,
+      opts.lineWidthOverride,
+      useSingle ? opts.singleColor! : pl.color
+    );
   }
 
   // Вырезаем прямоугольники под подписями
@@ -76,7 +92,8 @@ export function drawScene(ctx: CanvasRenderingContext2D, opts: SceneOptions): vo
   ctx.drawImage(off, 0, 0, W, H);
 
   // ── Подписи поверх ─────────────────────────────────────────────────────────
-  ctx.font = `${FONT_SIZE}px ${FONT_FAMILY}`;
+  const fontSize = opts.fontSize ?? FONT_SIZE;
+  ctx.font = `${fontSize}px ${FONT_FAMILY}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
 
@@ -86,7 +103,7 @@ export function drawScene(ctx: CanvasRenderingContext2D, opts: SceneOptions): vo
     ctx.save();
     ctx.translate(lbl.center.x, lbl.center.y);
     ctx.rotate(lbl.angle);
-    ctx.fillStyle = pl.color;
+    ctx.fillStyle = useSingle ? opts.singleColor! : pl.color;
     ctx.fillText(lbl.text, 0, 0);
     ctx.restore();
   }
@@ -95,12 +112,15 @@ export function drawScene(ctx: CanvasRenderingContext2D, opts: SceneOptions): vo
 function drawPolylineRaw(
   ctx: CanvasRenderingContext2D,
   pl: Polyline,
-  selected: boolean
+  selected: boolean,
+  lineWidthOverride?: number,
+  colorOverride?: string
 ): void {
   if (pl.points.length < 2) return;
+  const lw = lineWidthOverride ?? pl.lineWidth;
   ctx.beginPath();
-  ctx.strokeStyle = selected ? SELECT_COLOR : pl.color;
-  ctx.lineWidth = selected ? pl.lineWidth + 2 : pl.lineWidth;
+  ctx.strokeStyle = selected ? SELECT_COLOR : (colorOverride ?? pl.color);
+  ctx.lineWidth = selected ? lw + 2 : lw;
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
   ctx.moveTo(pl.points[0].x, pl.points[0].y);

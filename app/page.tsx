@@ -6,7 +6,11 @@ import ControlPanel from '@/components/ControlPanel';
 import ExportDialog, { ExportSettings, getPixelSize, getPaperSizeMM } from '@/components/ExportDialog';
 import { Polyline, PlacedLabel, Tool } from '@/lib/types';
 import { placeLabels, PlacementStats } from '@/lib/labelPlacement';
-import { drawScene, SCENE_BG } from '@/lib/renderScene';
+import { drawScene, SCENE_BG, ColorMode } from '@/lib/renderScene';
+import {
+  Viewport, IDENTITY_VIEWPORT, fitBBoxToCanvas, transformPolylines, zoomAt,
+} from '@/lib/viewport';
+import { parseLinesFile, computeBBox } from '@/lib/parseLinesFile';
 
 // Canvas не рендерится на сервере — SSR отключён
 const MapCanvas = dynamic(() => import('@/components/MapCanvas'), { ssr: false });
@@ -89,6 +93,15 @@ export default function Home() {
   const [currentColor, setCurrentColor] = useState('#2563eb');
   const [currentStep, setCurrentStep] = useState(1);
   const [currentLineWidth, setCurrentLineWidth] = useState(2);
+  const [globalStep, setGlobalStep] = useState(2); // период подписей в долях её длины
+  const [globalFontSize, setGlobalFontSize] = useState(14);
+  const [globalLineWidth, setGlobalLineWidth] = useState<number | null>(null); // null = индивидуально по линиям
+  const [colorMode, setColorMode] = useState<ColorMode>('rainbow');
+  const [singleColor, setSingleColor] = useState('#1e40af');
+  const [showGrid, setShowGrid] = useState(true);
+  const [viewport, setViewport] = useState<Viewport>(IDENTITY_VIEWPORT);
+  const [canvasSize, setCanvasSize] = useState({ w: 0, h: 0 });
+  const [isPlacing, setIsPlacing] = useState(false);
 
   const clearPlacement = () => { setPlacedLabels([]); setStats(null); };
 
@@ -108,19 +121,85 @@ export default function Home() {
     setSelectedId((s) => (s === id ? null : s));
   }, []);
 
+  // Расстановка: переводим ломаные в экран → запускаем алгоритм → лейблы хранятся в экранных координатах
+  const runPlacement = useCallback((pls: Polyline[], vp: Viewport, step: number, fs: number) => {
+    const screenPolylines = transformPolylines(pls, vp);
+    return placeLabels(screenPolylines, { globalStep: step, fontSize: fs });
+  }, []);
+
   const handlePlaceLabels = useCallback(() => {
-    const res = placeLabels(polylines);
-    setPlacedLabels(res.labels);
-    setStats(res.stats);
-  }, [polylines]);
+    if (polylines.length === 0) return;
+    setIsPlacing(true);
+    setTimeout(() => {
+      const res = runPlacement(polylines, viewport, globalStep, globalFontSize);
+      setPlacedLabels(res.labels);
+      setStats(res.stats);
+      setIsPlacing(false);
+    }, 30);
+  }, [polylines, viewport, globalStep, globalFontSize, runPlacement]);
 
   const handleLoadSample = useCallback(() => {
     const sample = buildSample();
-    const res = placeLabels(sample);
     setPolylines(sample);
+    setViewport(IDENTITY_VIEWPORT);
+    const res = runPlacement(sample, IDENTITY_VIEWPORT, globalStep, globalFontSize);
     setPlacedLabels(res.labels);
     setStats(res.stats);
     setSelectedId(null);
+  }, [runPlacement, globalStep, globalFontSize]);
+
+  // ── Загрузка реальной карты из .txt ───────────────────────────────────────
+  const handleLoadFile = useCallback(async (file: File) => {
+    const text = await file.text();
+    const loaded = parseLinesFile(text);
+    if (loaded.length === 0) {
+      alert('В файле не найдено ни одной ломаной');
+      return;
+    }
+    setPolylines(loaded);
+    setSelectedId(null);
+    clearPlacement();
+
+    // Вписать карту в текущий размер холста
+    const bbox = computeBBox(loaded);
+    if (bbox && canvasSize.w > 0) {
+      const vp = fitBBoxToCanvas(bbox, canvasSize.w, canvasSize.h);
+      setViewport(vp);
+    }
+  }, [canvasSize]);
+
+  // ── Управление масштабом ──────────────────────────────────────────────────
+  const handleZoomIn = useCallback(() => {
+    const center = { x: canvasSize.w / 2, y: canvasSize.h / 2 };
+    setViewport((v) => zoomAt(v, center, 1.3));
+    clearPlacement();
+  }, [canvasSize]);
+
+  const handleZoomOut = useCallback(() => {
+    const center = { x: canvasSize.w / 2, y: canvasSize.h / 2 };
+    setViewport((v) => zoomAt(v, center, 1 / 1.3));
+    clearPlacement();
+  }, [canvasSize]);
+
+  const handleFitToScreen = useCallback(() => {
+    const bbox = computeBBox(polylines);
+    if (!bbox || canvasSize.w === 0) return;
+    setViewport(fitBBoxToCanvas(bbox, canvasSize.w, canvasSize.h));
+    clearPlacement();
+  }, [polylines, canvasSize]);
+
+  const handleResetView = useCallback(() => {
+    setViewport(IDENTITY_VIEWPORT);
+    clearPlacement();
+  }, []);
+
+  const handleViewportChange = useCallback((vp: Viewport) => {
+    setViewport(vp);
+    clearPlacement();
+  }, []);
+
+  const handleCanvasSize = useCallback((w: number, h: number) => {
+    setCanvasSize((prev) => (prev.w === w && prev.h === h ? prev : { w, h }));
   }, []);
 
   // ── Экспорт в PDF ───────────────────────────────────────────────────────────
@@ -176,16 +255,23 @@ export default function Home() {
       outCtx.translate(offsetX, offsetY);
       outCtx.scale(fitScale, fitScale);
 
+      // Ломаные в экранных координатах (placedLabels уже в экранных)
+      const screenPolylines = transformPolylines(polylines, viewport);
+
       // Рендерим ту же самую сцену тем же самым кодом — это и есть "смена графического контекста"
       drawScene(outCtx, {
         sceneWidth: sceneW,
         sceneHeight: sceneH,
         pixelRatio: fitScale,
-        polylines,
+        polylines: screenPolylines,
         placedLabels,
         showGrid: settings.showGrid,
         background: settings.showGrid ? SCENE_BG : '#ffffff',
         selectedId: null,
+        fontSize: globalFontSize,
+        lineWidthOverride: globalLineWidth ?? undefined,
+        colorMode,
+        singleColor,
       });
 
       outCtx.restore();
@@ -210,7 +296,7 @@ export default function Home() {
     } finally {
       setExporting(false);
     }
-  }, [polylines, placedLabels]);
+  }, [polylines, placedLabels, viewport, globalFontSize, globalLineWidth, colorMode, singleColor]);
 
   return (
     <div className="flex h-screen bg-slate-100 overflow-hidden">
@@ -223,10 +309,18 @@ export default function Home() {
           currentColor={currentColor}
           currentStep={currentStep}
           currentLineWidth={currentLineWidth}
+          viewport={viewport}
+          showGrid={showGrid}
+          fontSize={globalFontSize}
+          lineWidthOverride={globalLineWidth ?? undefined}
+          colorMode={colorMode}
+          singleColor={singleColor}
           onPolylineAdded={addPolyline}
           onPolylineSelected={setSelectedId}
           onPolylineDeleted={deletePolyline}
           onCanvasReady={handleCanvasReady}
+          onViewportChange={handleViewportChange}
+          onCanvasSize={handleCanvasSize}
         />
       </main>
 
@@ -237,17 +331,39 @@ export default function Home() {
         currentColor={currentColor}
         currentStep={currentStep}
         currentLineWidth={currentLineWidth}
+        globalStep={globalStep}
+        globalFontSize={globalFontSize}
+        globalLineWidth={globalLineWidth}
+        colorMode={colorMode}
+        singleColor={singleColor}
+        showGrid={showGrid}
+        scalePercent={viewport.scale * 100}
+        isPlacing={isPlacing}
         labelsPlaced={placedLabels.length > 0}
         stats={stats}
         onToolChange={setTool}
         onColorChange={setCurrentColor}
         onStepChange={setCurrentStep}
         onLineWidthChange={setCurrentLineWidth}
+        onGlobalStepChange={(s) => { setGlobalStep(s); clearPlacement(); }}
+        onGlobalFontSizeChange={(s) => { setGlobalFontSize(s); clearPlacement(); }}
+        onGlobalLineWidthChange={setGlobalLineWidth}
+        onColorModeChange={setColorMode}
+        onSingleColorChange={setSingleColor}
+        onShowGridChange={setShowGrid}
         onPlaceLabels={handlePlaceLabels}
         onClearLabels={() => { setPlacedLabels([]); setStats(null); }}
-        onClearAll={() => { setPolylines([]); setPlacedLabels([]); setStats(null); setSelectedId(null); }}
+        onClearAll={() => {
+          setPolylines([]); setPlacedLabels([]); setStats(null);
+          setSelectedId(null); setViewport(IDENTITY_VIEWPORT);
+        }}
         onLoadSample={handleLoadSample}
+        onLoadFile={handleLoadFile}
         onExportPdf={() => setExportOpen(true)}
+        onZoomIn={handleZoomIn}
+        onZoomOut={handleZoomOut}
+        onFitToScreen={handleFitToScreen}
+        onResetView={handleResetView}
         onPolylineUpdate={updatePolyline}
         onPolylineDelete={deletePolyline}
         onPolylineSelect={setSelectedId}

@@ -6,35 +6,35 @@ import {
   checkRectanglesIntersect,
   segmentIntersectsOBB,
 } from './geometry';
+import { SegmentGrid } from './spatialIndex';
 
-export const FONT_SIZE = 14;
+export const FONT_SIZE = 14; // шрифт по умолчанию
 export const FONT_FAMILY = 'Arial, sans-serif';
 
-/**
- * Оцениваем ширину текста. При рендере используем ctx.measureText для точного значения,
- * здесь — приближённое значение для расчёта позиций.
- */
-export function estimateTextWidth(text: string): number {
-  return text.length * 8.2;
+/** Ширина текста в пикселях для произвольного размера шрифта. */
+export function estimateTextWidth(text: string, fontSize: number = FONT_SIZE): number {
+  return text.length * 8.2 * (fontSize / FONT_SIZE);
 }
 
-export const LABEL_HEIGHT = FONT_SIZE + 6;
 export const LABEL_PADDING_X = 4;
-
-/** Запас вокруг подписи, чтобы ломаные не "касались" букв. */
 export const LABEL_MARGIN = 3;
 
-/**
- * Сдвиги позиции-кандидата (в долях labelWidth), если базовая позиция не подошла.
- * 0 — сначала пробуем без сдвига, затем чередуем + и − с растущей амплитудой.
- */
+/** Высота подписи (с небольшим запасом). */
+export function labelHeightFor(fontSize: number): number {
+  return fontSize + 6;
+}
+
+/** Совместимость со старым кодом. */
+export const LABEL_HEIGHT = labelHeightFor(FONT_SIZE);
+
 const SHIFT_ATTEMPTS = [0, -0.25, 0.25, -0.5, 0.5, -0.75, 0.75];
 
 export interface PlacementStats {
-  attempted: number; // сколько позиций-кандидатов было рассмотрено
-  placed: number;    // сколько подписей реально поставили
-  rejectedByLabel: number;    // сколько отклонено из-за пересечения с другими подписями
-  rejectedByPolyline: number; // сколько отклонено из-за пересечения с чужими ломаными
+  attempted: number;
+  placed: number;
+  rejectedByLabel: number;
+  rejectedByPolyline: number;
+  durationMs: number;
 }
 
 export interface PlacementResult {
@@ -42,20 +42,33 @@ export interface PlacementResult {
   stats: PlacementStats;
 }
 
+export interface PlacementOptions {
+  /** Период повторения подписи в долях её длины. step=2 → расстояние между подписями = 2 длины подписи. */
+  globalStep?: number;
+  /** Размер шрифта подписи в пикселях. По умолчанию FONT_SIZE. */
+  fontSize?: number;
+}
+
 /**
- * Основной алгоритм расстановки подписей на ломаных.
- *
- * Коллизии проверяются в двух измерениях:
- *   1. Подпись ↔ подпись (SAT на OBB).
- *   2. Подпись ↔ чужая ломаная (Liang-Barsky в локальной СК OBB).
- *
- * Если базовая позиция не подходит, пробуется ряд сдвигов вдоль ломаной.
+ * Расстановка подписей.
+ * - Подписи не пересекают друг друга (SAT/OBB).
+ * - Подписи не пересекают чужие ломаные (Liang-Barsky на отрезках).
+ * - При неудаче пробуется ряд сдвигов вдоль ломаной.
+ * - Для скорости используется равномерная сетка отрезков (без неё — секунды на больших картах).
  */
-export function placeLabels(polylines: Polyline[]): PlacementResult {
+export function placeLabels(
+  polylines: Polyline[],
+  opts: PlacementOptions = {}
+): PlacementResult {
+  const t0 = performance.now();
   const placed: PlacedLabel[] = [];
   const stats: PlacementStats = {
-    attempted: 0, placed: 0, rejectedByLabel: 0, rejectedByPolyline: 0,
+    attempted: 0, placed: 0, rejectedByLabel: 0, rejectedByPolyline: 0, durationMs: 0,
   };
+
+  const fontSize = opts.fontSize ?? FONT_SIZE;
+  const grid = new SegmentGrid(Math.max(40, fontSize * 4));
+  grid.build(polylines);
 
   for (const polyline of polylines) {
     if (!polyline.label.trim() || polyline.points.length < 2) continue;
@@ -66,19 +79,20 @@ export function placeLabels(polylines: Polyline[]): PlacementResult {
         : polyline.points;
 
     const totalLength = getPolylineLength(points);
-    const labelWidth = estimateTextWidth(polyline.label) + LABEL_PADDING_X * 2;
-    const labelHeight = LABEL_HEIGHT;
+    const labelWidth = estimateTextWidth(polyline.label, fontSize) + LABEL_PADDING_X * 2;
+    const labelHeight = labelHeightFor(fontSize);
     const obbW = labelWidth + LABEL_MARGIN * 2;
     const obbH = labelHeight + LABEL_MARGIN * 2;
 
-    const stepDistance = (polyline.step + 1) * labelWidth;
+    // Период повторения: либо глобальный, либо персональный + 1 (старая семантика).
+    const periodMultiplier = opts.globalStep ?? (polyline.step + 1);
+    const stepDistance = periodMultiplier * labelWidth;
+    if (stepDistance < 1) continue;
 
     let pos = labelWidth / 2;
 
     while (pos + labelWidth / 2 <= totalLength) {
       stats.attempted++;
-
-      let settled = false;
 
       for (const shiftFrac of SHIFT_ATTEMPTS) {
         const tryPos = pos + shiftFrac * labelWidth;
@@ -94,16 +108,18 @@ export function placeLabels(polylines: Polyline[]): PlacementResult {
         const corners = getRotatedCorners(result.point, obbW, obbH, angle);
 
         // 1) Коллизия с уже размещёнными подписями
-        const hitLabel = placed.some((l) =>
-          checkRectanglesIntersect(corners, l.corners)
-        );
-        if (hitLabel) { if (shiftFrac === 0) stats.rejectedByLabel++; continue; }
+        if (placed.some((l) => checkRectanglesIntersect(corners, l.corners))) {
+          if (shiftFrac === 0) stats.rejectedByLabel++;
+          continue;
+        }
 
-        // 2) Коллизия с чужими ломаными
-        const hitPolyline = intersectsOtherPolylines(
-          result.point, obbW, obbH, angle, polylines, polyline.id
-        );
-        if (hitPolyline) { if (shiftFrac === 0) stats.rejectedByPolyline++; continue; }
+        // 2) Коллизия с чужими ломаными — через spatial index
+        if (intersectsOtherPolylinesIndexed(
+          result.point, obbW, obbH, angle, corners, grid, polyline.id
+        )) {
+          if (shiftFrac === 0) stats.rejectedByPolyline++;
+          continue;
+        }
 
         placed.push({
           polylineId: polyline.id,
@@ -115,44 +131,39 @@ export function placeLabels(polylines: Polyline[]): PlacementResult {
           corners,
         });
         stats.placed++;
-        settled = true;
         break;
       }
-
-      // void (подавление unused-variable lint — settled нужен для отладки)
-      void settled;
 
       pos += stepDistance;
     }
   }
 
+  stats.durationMs = Math.round(performance.now() - t0);
   return { labels: placed, stats };
 }
 
-/**
- * Проверка: OBB подписи пересекает хотя бы один отрезок любой ЧУЖОЙ ломаной.
- * Ломаная, на которой стоит подпись (excludeId), пропускается — её разрывает рендер.
- */
-function intersectsOtherPolylines(
+function intersectsOtherPolylinesIndexed(
   center: Point,
   width: number,
   height: number,
   angle: number,
-  polylines: Polyline[],
+  corners: Point[],
+  grid: SegmentGrid,
   excludeId: string
 ): boolean {
-  for (const pl of polylines) {
-    if (pl.id === excludeId) continue;
-    for (let i = 1; i < pl.points.length; i++) {
-      if (
-        segmentIntersectsOBB(
-          pl.points[i - 1], pl.points[i],
-          center, width, height, angle
-        )
-      ) {
-        return true;
-      }
-    }
+  // bbox OBB по углам — для запроса в индекс
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const c of corners) {
+    if (c.x < minX) minX = c.x;
+    if (c.y < minY) minY = c.y;
+    if (c.x > maxX) maxX = c.x;
+    if (c.y > maxY) maxY = c.y;
+  }
+  const candidates = grid.queryBBox(minX, minY, maxX, maxY);
+
+  for (const seg of candidates) {
+    if (seg.polylineId === excludeId) continue;
+    if (segmentIntersectsOBB(seg.a, seg.b, center, width, height, angle)) return true;
   }
   return false;
 }
