@@ -127,3 +127,67 @@ export function distanceToPolyline(point: Point, polylinePoints: Point[]): numbe
   }
   return minDist;
 }
+
+/**
+ * Пересечение отрезка с повёрнутым прямоугольником (OBB).
+ * Алгоритм: переводим отрезок в локальную СК OBB (прямоугольник становится осе-ориентированным),
+ * затем применяем параметрическое отсечение Liang-Barsky.
+ *
+ * Это ключевая проверка для требования руководителя:
+ * подписи не должны пересекаться с чужими ломаными на карте.
+ */
+export function segmentIntersectsOBB(
+  p1: Point,
+  p2: Point,
+  center: Point,
+  width: number,
+  height: number,
+  angle: number
+): boolean {
+  const cos = Math.cos(-angle);
+  const sin = Math.sin(-angle);
+
+  const toLocal = (p: Point): Point => {
+    const dx = p.x - center.x;
+    const dy = p.y - center.y;
+    return { x: dx * cos - dy * sin, y: dx * sin + dy * cos };
+  };
+
+  const a = toLocal(p1);
+  const b = toLocal(p2);
+  const hw = width / 2;
+  const hh = height / 2;
+
+  // Быстрый выход: один из концов внутри OBB
+  if (Math.abs(a.x) <= hw && Math.abs(a.y) <= hh) return true;
+  if (Math.abs(b.x) <= hw && Math.abs(b.y) <= hh) return true;
+
+  // Liang-Barsky: отсекаем P(t) = a + t·(b−a), t∈[0,1] по слэбам |x|≤hw, |y|≤hh
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+
+  let tmin = 0;
+  let tmax = 1;
+
+  // Слэб по X
+  if (dx !== 0) {
+    const t1 = (-hw - a.x) / dx;
+    const t2 = (hw - a.x) / dx;
+    tmin = Math.max(tmin, Math.min(t1, t2));
+    tmax = Math.min(tmax, Math.max(t1, t2));
+  } else if (a.x < -hw || a.x > hw) {
+    return false;
+  }
+
+  // Слэб по Y
+  if (dy !== 0) {
+    const t1 = (-hh - a.y) / dy;
+    const t2 = (hh - a.y) / dy;
+    tmin = Math.max(tmin, Math.min(t1, t2));
+    tmax = Math.min(tmax, Math.max(t1, t2));
+  } else if (a.y < -hh || a.y > hh) {
+    return false;
+  }
+
+  return tmin <= tmax;
+}

@@ -1,6 +1,7 @@
 'use client';
 
 import { Polyline, Tool } from '@/lib/types';
+import { PlacementStats } from '@/lib/labelPlacement';
 
 const PALETTE = [
   '#2563eb', '#dc2626', '#16a34a', '#9333ea',
@@ -15,6 +16,7 @@ interface ControlPanelProps {
   currentStep: number;
   currentLineWidth: number;
   labelsPlaced: boolean;
+  stats: PlacementStats | null;
   onToolChange: (t: Tool) => void;
   onColorChange: (c: string) => void;
   onStepChange: (s: number) => void;
@@ -23,6 +25,7 @@ interface ControlPanelProps {
   onClearLabels: () => void;
   onClearAll: () => void;
   onLoadSample: () => void;
+  onExportPdf: () => void;
   onPolylineUpdate: (p: Polyline) => void;
   onPolylineDelete: (id: string) => void;
   onPolylineSelect: (id: string | null) => void;
@@ -36,6 +39,7 @@ export default function ControlPanel({
   currentStep,
   currentLineWidth,
   labelsPlaced,
+  stats,
   onToolChange,
   onColorChange,
   onStepChange,
@@ -44,6 +48,7 @@ export default function ControlPanel({
   onClearLabels,
   onClearAll,
   onLoadSample,
+  onExportPdf,
   onPolylineUpdate,
   onPolylineDelete,
   onPolylineSelect,
@@ -128,6 +133,26 @@ export default function ControlPanel({
           </label>
         </Section>
 
+        {/* Статистика размещения */}
+        {stats && (
+          <Section title="Статистика размещения">
+            <div className="bg-slate-50 border border-slate-200 rounded-lg p-2.5 space-y-1 text-xs">
+              <StatRow label="Попыток" value={stats.attempted} />
+              <StatRow label="Размещено" value={stats.placed} color="text-green-700" />
+              <StatRow
+                label="Отклонено (подписи)"
+                value={stats.rejectedByLabel}
+                color="text-orange-700"
+              />
+              <StatRow
+                label="Отклонено (линии)"
+                value={stats.rejectedByPolyline}
+                color="text-red-700"
+              />
+            </div>
+          </Section>
+        )}
+
         {/* Кнопки действий */}
         <Section title="Действия">
           <div className="space-y-1.5">
@@ -154,6 +179,15 @@ export default function ControlPanel({
                          text-sm py-2 rounded-lg transition-colors"
             >
               Загрузить пример
+            </button>
+            <button
+              onClick={onExportPdf}
+              disabled={polylines.length === 0}
+              className="w-full bg-slate-800 hover:bg-slate-900 disabled:opacity-40 disabled:cursor-not-allowed
+                         text-white text-sm font-medium py-2 rounded-lg transition-colors
+                         flex items-center justify-center gap-1.5"
+            >
+              <span>📄</span> Экспорт в PDF
             </button>
             <button
               onClick={onClearAll}
@@ -201,6 +235,15 @@ export default function ControlPanel({
 }
 
 // ── Вспомогательные компоненты ────────────────────────────────────────────────
+
+function StatRow({ label, value, color }: { label: string; value: number; color?: string }) {
+  return (
+    <div className="flex justify-between items-center">
+      <span className="text-slate-500">{label}</span>
+      <span className={`font-semibold tabular-nums ${color ?? 'text-slate-800'}`}>{value}</span>
+    </div>
+  );
+}
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
