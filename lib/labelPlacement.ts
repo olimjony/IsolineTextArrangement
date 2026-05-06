@@ -252,6 +252,21 @@ export function placeLabelsBitmap(
   const maskLabels = new CollisionMask(W, H);
   const maskSelf   = new CollisionMask(W, H);
 
+  // Bounding box of ALL polylines in screen coordinates.
+  // Used to detect "frame" polylines that run along the data boundary —
+  // those are skipped for label placement (but still drawn on maskLines).
+  let dMinX = Infinity, dMinY = Infinity, dMaxX = -Infinity, dMaxY = -Infinity;
+  for (const pl of polylines) {
+    for (const p of pl.points) {
+      if (p.x < dMinX) dMinX = p.x;
+      if (p.y < dMinY) dMinY = p.y;
+      if (p.x > dMaxX) dMaxX = p.x;
+      if (p.y > dMaxY) dMaxY = p.y;
+    }
+  }
+  // Tolerance: 2px — handles sub-pixel differences after viewport transform.
+  const BORDER_TOL = 2;
+
   // Растеризуем все ломаные на общей маске
   for (const pl of polylines) {
     maskLines.drawPolyline(pl.points, Math.max(1, Math.round(pl.lineWidth)));
@@ -259,6 +274,17 @@ export function placeLabelsBitmap(
 
   for (const polyline of polylines) {
     if (!polyline.label.trim() || polyline.points.length < 2) continue;
+
+    // Skip polylines whose points all lie along one edge of the data bounding box —
+    // these are the map frame lines. They scale correctly with viewport because dMinX/dMaxX
+    // are computed from the already-transformed screen coordinates.
+    const pts = polyline.points;
+    const isFrameLine =
+      pts.every(p => Math.abs(p.x - dMinX) <= BORDER_TOL) ||
+      pts.every(p => Math.abs(p.x - dMaxX) <= BORDER_TOL) ||
+      pts.every(p => Math.abs(p.y - dMinY) <= BORDER_TOL) ||
+      pts.every(p => Math.abs(p.y - dMaxY) <= BORDER_TOL);
+    if (isFrameLine) continue;
 
     // Маска "своих" пикселей — чтобы не считать собственную линию как препятствие
     maskSelf.clearAll();
@@ -297,6 +323,19 @@ export function placeLabelsBitmap(
 
         const cx = result.point.x;
         const cy = result.point.y;
+
+        // Reject if the rotated label's AABB would touch or cross the data boundary.
+        // ax/ay = half-extents of the AABB enclosing the rotated OBB.
+        // dMinX/dMaxX/dMinY/dMaxY are in screen coords, so this scales with zoom.
+        const cos = Math.cos(angle);
+        const sin = Math.sin(angle);
+        const ax = Math.abs(cos * obbW / 2) + Math.abs(sin * obbH / 2);
+        const ay = Math.abs(sin * obbW / 2) + Math.abs(cos * obbH / 2);
+        if (cx - ax < dMinX || cx + ax > dMaxX ||
+            cy - ay < dMinY || cy + ay > dMaxY) {
+          if (shiftFrac === 0) stats.rejectedByPolyline++;
+          continue;
+        }
 
         const test = combinedTest(cx, cy, obbW, obbH, angle, maskLines, maskSelf, maskLabels, W, H);
 
@@ -354,10 +393,7 @@ function combinedTest(
   const ax = Math.abs(cos * hw) + Math.abs(sin * hh);
   const ay = Math.abs(sin * hw) + Math.abs(cos * hh);
 
-  // Keep labels away from canvas edges: use hw (half label width — the largest dimension)
-  // as a uniform inset margin. This catches vertical labels on boundary polylines where
-  // other lines' endpoint pixels are masked out by maskSelf (shared-pixel false negative).
-  if (cx - hw < 0 || cy - hw < 0 || cx + hw >= maxW || cy + hw >= maxH) {
+  if (cx - ax < 0 || cy - ay < 0 || cx + ax >= maxW || cy + ay >= maxH) {
     return { hitOther: true, hitLabel: false };
   }
 
