@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc *)",
+      "Bash(awk '$1 > -900 {print NR\": \"$0; count++; if\\(count>=5\\) exit}' /home/kenshi/Desktop/Unic/kursovaya/public/samples/lines20.txt)"
+    ]
+  }
+}

@@ -1,11 +1,11 @@
 'use client';
 
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import dynamic from 'next/dynamic';
 import ControlPanel from '@/components/ControlPanel';
 import ExportDialog, { ExportSettings, getPixelSize, getPaperSizeMM } from '@/components/ExportDialog';
 import { Polyline, PlacedLabel, Tool } from '@/lib/types';
-import { placeLabels, PlacementStats } from '@/lib/labelPlacement';
+import { placeLabels, PlacementStats, PlacementAlgorithm } from '@/lib/labelPlacement';
 import { drawScene, SCENE_BG, ColorMode } from '@/lib/renderScene';
 import {
   Viewport, IDENTITY_VIEWPORT, fitBBoxToCanvas, transformPolylines, zoomAt,
@@ -99,9 +99,14 @@ export default function Home() {
   const [colorMode, setColorMode] = useState<ColorMode>('rainbow');
   const [singleColor, setSingleColor] = useState('#1e40af');
   const [showGrid, setShowGrid] = useState(true);
+  const [algorithm, setAlgorithm] = useState<PlacementAlgorithm>('bitmap');
   const [viewport, setViewport] = useState<Viewport>(IDENTITY_VIEWPORT);
   const [canvasSize, setCanvasSize] = useState({ w: 0, h: 0 });
   const [isPlacing, setIsPlacing] = useState(false);
+  const [isBenchmarking, setIsBenchmarking] = useState(false);
+  const [benchmarkResults, setBenchmarkResults] = useState<{ sat: PlacementStats; bitmap: PlacementStats } | null>(null);
+  const [autoPlace, setAutoPlace] = useState(false);
+  const autoPlaceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearPlacement = () => { setPlacedLabels([]); setStats(null); };
 
@@ -122,31 +127,58 @@ export default function Home() {
   }, []);
 
   // Расстановка: переводим ломаные в экран → запускаем алгоритм → лейблы хранятся в экранных координатах
-  const runPlacement = useCallback((pls: Polyline[], vp: Viewport, step: number, fs: number) => {
+  const runPlacement = useCallback((
+    pls: Polyline[], vp: Viewport, step: number, fs: number,
+    algo: PlacementAlgorithm, cw: number, ch: number,
+  ) => {
     const screenPolylines = transformPolylines(pls, vp);
-    return placeLabels(screenPolylines, { globalStep: step, fontSize: fs });
+    return placeLabels(screenPolylines, {
+      globalStep: step,
+      fontSize: fs,
+      algorithm: algo,
+      canvasWidth: cw,
+      canvasHeight: ch,
+    });
   }, []);
 
   const handlePlaceLabels = useCallback(() => {
     if (polylines.length === 0) return;
     setIsPlacing(true);
     setTimeout(() => {
-      const res = runPlacement(polylines, viewport, globalStep, globalFontSize);
+      const res = runPlacement(polylines, viewport, globalStep, globalFontSize, algorithm, canvasSize.w, canvasSize.h);
       setPlacedLabels(res.labels);
       setStats(res.stats);
       setIsPlacing(false);
     }, 30);
-  }, [polylines, viewport, globalStep, globalFontSize, runPlacement]);
+  }, [polylines, viewport, globalStep, globalFontSize, algorithm, canvasSize, runPlacement]);
+
+  const handleBenchmark = useCallback(() => {
+    if (polylines.length === 0) return;
+    setIsBenchmarking(true);
+    setTimeout(() => {
+      const screenPolylines = transformPolylines(polylines, viewport);
+      const bitmapRes = placeLabels(screenPolylines, {
+        globalStep, fontSize: globalFontSize, algorithm: 'bitmap',
+        canvasWidth: canvasSize.w, canvasHeight: canvasSize.h,
+      });
+      const satRes = placeLabels(screenPolylines, {
+        globalStep, fontSize: globalFontSize, algorithm: 'sat',
+        canvasWidth: canvasSize.w, canvasHeight: canvasSize.h,
+      });
+      setBenchmarkResults({ bitmap: bitmapRes.stats, sat: satRes.stats });
+      setIsBenchmarking(false);
+    }, 30);
+  }, [polylines, viewport, globalStep, globalFontSize, canvasSize]);
 
   const handleLoadSample = useCallback(() => {
     const sample = buildSample();
     setPolylines(sample);
     setViewport(IDENTITY_VIEWPORT);
-    const res = runPlacement(sample, IDENTITY_VIEWPORT, globalStep, globalFontSize);
+    const res = runPlacement(sample, IDENTITY_VIEWPORT, globalStep, globalFontSize, algorithm, canvasSize.w, canvasSize.h);
     setPlacedLabels(res.labels);
     setStats(res.stats);
     setSelectedId(null);
-  }, [runPlacement, globalStep, globalFontSize]);
+  }, [runPlacement, globalStep, globalFontSize, algorithm, canvasSize]);
 
   // ── Загрузка реальной карты из .txt ───────────────────────────────────────
   const handleLoadFile = useCallback(async (file: File) => {
@@ -197,6 +229,23 @@ export default function Home() {
     setViewport(vp);
     clearPlacement();
   }, []);
+
+  // Auto-place: debounced re-placement whenever viewport changes while autoPlace is on
+  useEffect(() => {
+    if (!autoPlace || polylines.length === 0 || canvasSize.w === 0) return;
+    if (autoPlaceTimer.current) clearTimeout(autoPlaceTimer.current);
+    autoPlaceTimer.current = setTimeout(() => {
+      const screenPolylines = transformPolylines(polylines, viewport);
+      const res = placeLabels(screenPolylines, {
+        globalStep, fontSize: globalFontSize, algorithm,
+        canvasWidth: canvasSize.w, canvasHeight: canvasSize.h,
+      });
+      setPlacedLabels(res.labels);
+      setStats(res.stats);
+    }, 400);
+    return () => { if (autoPlaceTimer.current) clearTimeout(autoPlaceTimer.current); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewport, autoPlace]);
 
   const handleCanvasSize = useCallback((w: number, h: number) => {
     setCanvasSize((prev) => (prev.w === w && prev.h === h ? prev : { w, h }));
@@ -337,6 +386,7 @@ export default function Home() {
         colorMode={colorMode}
         singleColor={singleColor}
         showGrid={showGrid}
+        algorithm={algorithm}
         scalePercent={viewport.scale * 100}
         isPlacing={isPlacing}
         labelsPlaced={placedLabels.length > 0}
@@ -350,7 +400,13 @@ export default function Home() {
         onGlobalLineWidthChange={setGlobalLineWidth}
         onColorModeChange={setColorMode}
         onSingleColorChange={setSingleColor}
+        onAlgorithmChange={(a) => { setAlgorithm(a); clearPlacement(); }}
         onShowGridChange={setShowGrid}
+        onBenchmark={handleBenchmark}
+        isBenchmarking={isBenchmarking}
+        benchmarkResults={benchmarkResults}
+        autoPlace={autoPlace}
+        onAutoPlaceChange={setAutoPlace}
         onPlaceLabels={handlePlaceLabels}
         onClearLabels={() => { setPlacedLabels([]); setStats(null); }}
         onClearAll={() => {

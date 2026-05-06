@@ -1,7 +1,7 @@
 'use client';
 
 import { Polyline, Tool } from '@/lib/types';
-import { PlacementStats } from '@/lib/labelPlacement';
+import { PlacementStats, PlacementAlgorithm } from '@/lib/labelPlacement';
 import { ColorMode } from '@/lib/renderScene';
 
 const PALETTE = [
@@ -22,6 +22,7 @@ interface ControlPanelProps {
   colorMode: ColorMode;
   singleColor: string;
   showGrid: boolean;
+  algorithm: PlacementAlgorithm;
   scalePercent: number; // viewport.scale * 100, для отображения
   isPlacing: boolean;
   labelsPlaced: boolean;
@@ -35,7 +36,13 @@ interface ControlPanelProps {
   onGlobalLineWidthChange: (w: number | null) => void;
   onColorModeChange: (m: ColorMode) => void;
   onSingleColorChange: (c: string) => void;
+  onAlgorithmChange: (a: PlacementAlgorithm) => void;
   onShowGridChange: (v: boolean) => void;
+  onBenchmark: () => void;
+  isBenchmarking: boolean;
+  benchmarkResults: { sat: PlacementStats; bitmap: PlacementStats } | null;
+  autoPlace: boolean;
+  onAutoPlaceChange: (v: boolean) => void;
   onPlaceLabels: () => void;
   onClearLabels: () => void;
   onClearAll: () => void;
@@ -64,6 +71,7 @@ export default function ControlPanel({
   colorMode,
   singleColor,
   showGrid,
+  algorithm,
   scalePercent,
   isPlacing,
   labelsPlaced,
@@ -77,7 +85,13 @@ export default function ControlPanel({
   onGlobalLineWidthChange,
   onColorModeChange,
   onSingleColorChange,
+  onAlgorithmChange,
   onShowGridChange,
+  onBenchmark,
+  isBenchmarking,
+  benchmarkResults,
+  autoPlace,
+  onAutoPlaceChange,
   onPlaceLabels,
   onClearLabels,
   onClearAll,
@@ -151,6 +165,75 @@ export default function ControlPanel({
           <div className="text-[11px] text-slate-400 mt-1">
             Колесо мыши — зум · ПКМ/средняя — панорама
           </div>
+        </Section>
+
+        {/* Алгоритм размещения */}
+        <Section title="Алгоритм">
+          <div className="grid grid-cols-2 gap-1.5">
+            <button
+              onClick={() => onAlgorithmChange('bitmap')}
+              className={`py-1.5 text-xs rounded border transition-all
+                ${algorithm === 'bitmap'
+                  ? 'bg-blue-50 border-blue-400 text-blue-700 font-medium'
+                  : 'border-slate-200 hover:border-slate-300 text-slate-600'}`}
+              title="Растровый: O(M+N+K) через битовую маску и Брезенхэма"
+            >
+              🚀 Растровый
+            </button>
+            <button
+              onClick={() => onAlgorithmChange('sat')}
+              className={`py-1.5 text-xs rounded border transition-all
+                ${algorithm === 'sat'
+                  ? 'bg-blue-50 border-blue-400 text-blue-700 font-medium'
+                  : 'border-slate-200 hover:border-slate-300 text-slate-600'}`}
+              title="Точный: SAT/OBB геометрия с равномерной сеткой"
+            >
+              📐 Точный
+            </button>
+          </div>
+          <div className="text-[11px] text-slate-400 mt-1">
+            {algorithm === 'bitmap'
+              ? 'O(M + N + K) — битовая маска, Брезенхэм'
+              : 'O(N · M) — точная геометрия (SAT)'}
+          </div>
+          <button
+            onClick={onBenchmark}
+            disabled={polylines.length === 0 || isBenchmarking}
+            className="mt-2 w-full border border-purple-300 hover:bg-purple-50 disabled:opacity-40
+                       disabled:cursor-not-allowed text-purple-700 text-xs font-medium py-1.5
+                       rounded transition-colors flex items-center justify-center gap-1.5"
+          >
+            {isBenchmarking
+              ? <><span className="w-3 h-3 border-2 border-purple-400 border-t-transparent rounded-full animate-spin" /> Замеряем...</>
+              : '⏱ Сравнить алгоритмы'}
+          </button>
+          {benchmarkResults && (
+            <div className="mt-2 bg-slate-50 border border-slate-200 rounded-lg p-2 text-[11px] space-y-1">
+              <div className="flex justify-between font-semibold text-slate-600 pb-1 border-b border-slate-200">
+                <span>Алгоритм</span><span>Время</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">🚀 Растровый</span>
+                <span className={`font-semibold tabular-nums ${benchmarkResults.bitmap.durationMs < benchmarkResults.sat.durationMs ? 'text-green-700' : 'text-slate-700'}`}>
+                  {benchmarkResults.bitmap.durationMs} мс
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">📐 Точный</span>
+                <span className={`font-semibold tabular-nums ${benchmarkResults.sat.durationMs < benchmarkResults.bitmap.durationMs ? 'text-green-700' : 'text-slate-700'}`}>
+                  {benchmarkResults.sat.durationMs} мс
+                </span>
+              </div>
+              {benchmarkResults.sat.durationMs > 0 && (
+                <div className="pt-1 border-t border-slate-200 text-slate-500">
+                  Растровый быстрее в{' '}
+                  <strong className="text-green-700">
+                    {(benchmarkResults.sat.durationMs / Math.max(1, benchmarkResults.bitmap.durationMs)).toFixed(1)}×
+                  </strong>
+                </div>
+              )}
+            </div>
+          )}
         </Section>
 
         {/* Шаг подписей (глобально) */}
@@ -340,6 +423,12 @@ export default function ControlPanel({
         {stats && (
           <Section title="Статистика размещения">
             <div className="bg-slate-50 border border-slate-200 rounded-lg p-2.5 space-y-1 text-xs">
+              <div className="flex justify-between items-center pb-1 border-b border-slate-200">
+                <span className="text-slate-500">Алгоритм</span>
+                <span className="font-semibold text-slate-800">
+                  {stats.algorithm === 'bitmap' ? '🚀 Растровый' : '📐 Точный'}
+                </span>
+              </div>
               <StatRow label="Попыток" value={stats.attempted} />
               <StatRow label="Размещено" value={stats.placed} color="text-green-700" />
               <StatRow
@@ -352,11 +441,18 @@ export default function ControlPanel({
                 value={stats.rejectedByPolyline}
                 color="text-red-700"
               />
-              <StatRow
-                label="Время"
-                value={stats.durationMs}
-                color="text-slate-700"
-              />
+              <div className="flex justify-between items-center pt-1 border-t border-slate-200">
+                <span className="text-slate-500">Время</span>
+                <span className={`font-semibold tabular-nums ${stats.durationMs < 1000 ? 'text-green-700' : 'text-orange-700'}`}>
+                  {stats.durationMs} мс
+                </span>
+              </div>
+              {stats.memoryKb !== undefined && (
+                <div className="flex justify-between items-center">
+                  <span className="text-slate-500">Память маски</span>
+                  <span className="font-semibold tabular-nums text-slate-700">{stats.memoryKb} КБ</span>
+                </div>
+              )}
             </div>
           </Section>
         )}
@@ -364,6 +460,25 @@ export default function ControlPanel({
         {/* Кнопки действий */}
         <Section title="Действия">
           <div className="space-y-1.5">
+            <label className={`flex items-center gap-2 p-2 rounded-lg border cursor-pointer transition-all
+              ${autoPlace
+                ? 'bg-green-50 border-green-400 text-green-800'
+                : 'bg-slate-50 border-slate-200 text-slate-600 hover:border-slate-300'}`}>
+              <input
+                type="checkbox"
+                checked={autoPlace}
+                onChange={(e) => onAutoPlaceChange(e.target.checked)}
+                className="accent-green-600 w-4 h-4"
+              />
+              <div className="flex-1 min-w-0">
+                <div className="text-xs font-medium leading-tight">
+                  {autoPlace ? '🔄 Авто-расстановка вкл.' : 'Авто-расстановка'}
+                </div>
+                <div className="text-[10px] opacity-70 mt-0.5 leading-tight">
+                  Подписи обновляются при зуме и панораме
+                </div>
+              </div>
+            </label>
             <button
               onClick={onPlaceLabels}
               disabled={polylines.length === 0 || isPlacing}
@@ -440,7 +555,7 @@ export default function ControlPanel({
 
       {/* Статус */}
       <div className="border-t border-slate-100 px-4 py-2 text-xs text-slate-400 bg-slate-50">
-        {polylines.length} линий · Алгоритм: SAT (OBB)
+        {polylines.length} линий · {algorithm === 'bitmap' ? '🚀 Растровый O(M+N+K)' : '📐 Точный O(N·M)'}
       </div>
     </aside>
   );
