@@ -4,13 +4,15 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import dynamic from 'next/dynamic';
 import ControlPanel from '@/components/ControlPanel';
 import ExportDialog, { ExportSettings, getPixelSize, getPaperSizeMM } from '@/components/ExportDialog';
+import FullBenchmarkDialog from '@/components/FullBenchmarkDialog';
 import { Polyline, PlacedLabel, Tool } from '@/lib/types';
 import { placeLabels, PlacementStats, PlacementAlgorithm } from '@/lib/labelPlacement';
+import { runFullBenchmark, FullBenchmarkResult } from '@/lib/fullBenchmark';
 import { drawScene, SCENE_BG, ColorMode } from '@/lib/renderScene';
 import {
   Viewport, IDENTITY_VIEWPORT, fitBBoxToCanvas, transformPolylines, zoomAt,
 } from '@/lib/viewport';
-import { parseLinesFile, computeBBox } from '@/lib/parseLinesFile';
+import { parseLinesFileWithDiagnostics, computeBBox, ParseDiagnostics } from '@/lib/parseLinesFile';
 
 // Canvas не рендерится на сервере — SSR отключён
 const MapCanvas = dynamic(() => import('@/components/MapCanvas'), { ssr: false });
@@ -108,6 +110,35 @@ export default function Home() {
   const [autoPlace, setAutoPlace] = useState(false);
   const autoPlaceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // ── Полный бенчмарк (виртуальный — экран не меняется) ────────────────────
+  const [fullBenchOpen, setFullBenchOpen] = useState(false);
+  const [fullBenchRunning, setFullBenchRunning] = useState(false);
+  const [fullBenchProgress, setFullBenchProgress] = useState({ done: 0, total: 0, label: '' });
+  const [fullBenchResult, setFullBenchResult] = useState<FullBenchmarkResult | null>(null);
+
+  const handleFullBenchmark = useCallback(async () => {
+    if (polylines.length === 0 || canvasSize.w === 0) return;
+    setFullBenchOpen(true);
+    setFullBenchRunning(true);
+    setFullBenchResult(null);
+    setFullBenchProgress({ done: 0, total: 10, label: 'старт' });
+    try {
+      const result = await runFullBenchmark(polylines, canvasSize.w, canvasSize.h, {
+        globalStep,
+        globalFontSize,
+        globalLineWidth,
+        scales: [20, 40, 60, 80, 100],
+        onProgress: (done, total, label) => setFullBenchProgress({ done, total, label }),
+      });
+      setFullBenchResult(result);
+    } catch (e) {
+      alert((e as Error).message ?? 'Ошибка бенчмарка');
+      setFullBenchOpen(false);
+    } finally {
+      setFullBenchRunning(false);
+    }
+  }, [polylines, canvasSize, globalStep, globalFontSize, globalLineWidth]);
+
   const clearPlacement = () => { setPlacedLabels([]); setStats(null); };
 
   const addPolyline = useCallback((pl: Polyline) => {
@@ -178,12 +209,17 @@ export default function Home() {
     setPlacedLabels(res.labels);
     setStats(res.stats);
     setSelectedId(null);
+    setParseDiag(null);
+    setLastLoadedFileName(null);
   }, [runPlacement, globalStep, globalFontSize, algorithm, canvasSize]);
 
   // ── Загрузка реальной карты из .txt ───────────────────────────────────────
+  const [parseDiag, setParseDiag] = useState<ParseDiagnostics | null>(null);
+  const [lastLoadedFileName, setLastLoadedFileName] = useState<string | null>(null);
+
   const handleLoadFile = useCallback(async (file: File) => {
     const text = await file.text();
-    const loaded = parseLinesFile(text);
+    const { polylines: loaded, diagnostics } = parseLinesFileWithDiagnostics(text);
     if (loaded.length === 0) {
       alert('В файле не найдено ни одной ломаной');
       return;
@@ -191,6 +227,8 @@ export default function Home() {
     setPolylines(loaded);
     setSelectedId(null);
     clearPlacement();
+    setParseDiag(diagnostics);
+    setLastLoadedFileName(file.name);
 
     // Вписать карту в текущий размер холста
     const bbox = computeBBox(loaded);
@@ -412,6 +450,7 @@ export default function Home() {
         onClearAll={() => {
           setPolylines([]); setPlacedLabels([]); setStats(null);
           setSelectedId(null); setViewport(IDENTITY_VIEWPORT);
+          setParseDiag(null); setLastLoadedFileName(null);
         }}
         onLoadSample={handleLoadSample}
         onLoadFile={handleLoadFile}
@@ -423,12 +462,24 @@ export default function Home() {
         onPolylineUpdate={updatePolyline}
         onPolylineDelete={deletePolyline}
         onPolylineSelect={setSelectedId}
+        onFullBenchmark={handleFullBenchmark}
+        isFullBenchmarking={fullBenchRunning}
+        parseDiagnostics={parseDiag}
+        lastLoadedFileName={lastLoadedFileName}
       />
 
       <ExportDialog
         open={exportOpen}
         onClose={() => !exporting && setExportOpen(false)}
         onExport={runExport}
+      />
+
+      <FullBenchmarkDialog
+        open={fullBenchOpen}
+        onClose={() => !fullBenchRunning && setFullBenchOpen(false)}
+        running={fullBenchRunning}
+        progress={fullBenchProgress}
+        result={fullBenchResult}
       />
 
       {exporting && (

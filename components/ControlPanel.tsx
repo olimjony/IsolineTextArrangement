@@ -3,6 +3,7 @@
 import { Polyline, Tool } from '@/lib/types';
 import { PlacementStats, PlacementAlgorithm } from '@/lib/labelPlacement';
 import { ColorMode } from '@/lib/renderScene';
+import { ParseDiagnostics } from '@/lib/parseLinesFile';
 
 const PALETTE = [
   '#2563eb', '#dc2626', '#16a34a', '#9333ea',
@@ -56,6 +57,10 @@ interface ControlPanelProps {
   onPolylineUpdate: (p: Polyline) => void;
   onPolylineDelete: (id: string) => void;
   onPolylineSelect: (id: string | null) => void;
+  onFullBenchmark: () => void;
+  isFullBenchmarking: boolean;
+  parseDiagnostics: ParseDiagnostics | null;
+  lastLoadedFileName: string | null;
 }
 
 export default function ControlPanel({
@@ -105,6 +110,10 @@ export default function ControlPanel({
   onPolylineUpdate,
   onPolylineDelete,
   onPolylineSelect,
+  onFullBenchmark,
+  isFullBenchmarking,
+  parseDiagnostics,
+  lastLoadedFileName,
 }: ControlPanelProps) {
   const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
@@ -152,6 +161,13 @@ export default function ControlPanel({
               </button>
             ))}
           </div>
+
+          {parseDiagnostics && (
+            <ParseDiagnosticsBlock
+              diagnostics={parseDiagnostics}
+              fileName={lastLoadedFileName}
+            />
+          )}
         </Section>
 
         {/* Масштаб карты */}
@@ -551,6 +567,25 @@ export default function ControlPanel({
             Нарисуйте ломаные или загрузите пример
           </div>
         )}
+
+        {/* Полный бенчмарк — в самом низу */}
+        <Section title="Полный бенчмарк">
+          <button
+            onClick={onFullBenchmark}
+            disabled={polylines.length === 0 || isFullBenchmarking}
+            className="w-full bg-purple-600 hover:bg-purple-700 disabled:opacity-40 disabled:cursor-not-allowed
+                       text-white text-sm font-medium py-2 rounded-lg transition-colors
+                       flex items-center justify-center gap-2"
+          >
+            {isFullBenchmarking
+              ? <><span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" /> Прогоняем...</>
+              : '📊 Прогнать все масштабы (20–100%)'}
+          </button>
+          <div className="text-[11px] text-slate-400 mt-1.5 leading-snug">
+            Виртуально считает оба алгоритма для масштабов 20%, 40%, 60%, 80%, 100%
+            (fit-to-screen). Экран не меняется. Результаты — в таблице.
+          </div>
+        </Section>
       </div>
 
       {/* Статус */}
@@ -595,6 +630,102 @@ function ZoomBtn({
     >
       {children}
     </button>
+  );
+}
+
+function ParseDiagnosticsBlock({
+  diagnostics: d,
+  fileName,
+}: {
+  diagnostics: ParseDiagnostics;
+  fileName: string | null;
+}) {
+  const hasIssues = d.sectionsDropped > 0 || d.malformedLines > 0;
+  const okStyle = 'bg-green-50 border-green-200';
+  const warnStyle = 'bg-orange-50 border-orange-200';
+
+  return (
+    <div className={`mt-2 rounded-lg p-2 text-[11px] border ${hasIssues ? warnStyle : okStyle}`}>
+      <div className="flex items-center justify-between mb-1.5">
+        <span className={`font-semibold ${hasIssues ? 'text-orange-800' : 'text-green-800'}`}>
+          {hasIssues ? '⚠ Загружено с замечаниями' : '✓ Загружено чисто'}
+        </span>
+        <span className="text-slate-500 truncate max-w-[8rem]" title={fileName ?? ''}>
+          {fileName}
+        </span>
+      </div>
+
+      <div className="space-y-0.5 text-slate-700">
+        <DiagRow label="Секций в файле" value={d.totalSections} />
+        <DiagRow label="Создано ломаных" value={d.polylinesCreated} bold color="text-green-800" />
+        <DiagRow label="Точек в ломаных" value={d.pointsInPolylines} />
+        {d.sectionsDropped > 0 && (
+          <DiagRow
+            label="⚠ Пропущено секций"
+            value={d.sectionsDropped}
+            bold
+            color="text-orange-800"
+          />
+        )}
+        {d.sentinelsSkipped > 0 && (
+          <DiagRow
+            label="Sentinel-точек (< −900)"
+            value={d.sentinelsSkipped}
+            color="text-slate-500"
+          />
+        )}
+        {d.malformedLines > 0 && (
+          <DiagRow
+            label="⚠ Битых строк"
+            value={d.malformedLines}
+            bold
+            color="text-red-700"
+          />
+        )}
+      </div>
+
+      {d.droppedSections.length > 0 && (
+        <details className="mt-1.5">
+          <summary className="cursor-pointer text-[10px] text-orange-700 hover:underline">
+            Какие секции потерялись ({d.droppedSections.length})
+          </summary>
+          <div className="mt-1 max-h-28 overflow-y-auto bg-white border border-slate-200 rounded p-1.5 space-y-0.5">
+            {d.droppedSections.slice(0, 100).map((s, i) => (
+              <div key={i} className="text-[10px] text-slate-600 tabular-nums flex justify-between">
+                <span>value = {s.value}</span>
+                <span className="text-slate-400">
+                  {s.pointCount} {s.pointCount === 1 ? 'точка' : 'точек'}
+                  {s.firstPoint && ` @ (${Math.round(s.firstPoint.x)}, ${Math.round(s.firstPoint.y)})`}
+                </span>
+              </div>
+            ))}
+            {d.droppedSections.length > 100 && (
+              <div className="text-[10px] text-slate-400 italic">
+                …и ещё {d.droppedSections.length - 100}
+              </div>
+            )}
+          </div>
+        </details>
+      )}
+    </div>
+  );
+}
+
+function DiagRow({
+  label, value, bold, color,
+}: {
+  label: string;
+  value: number;
+  bold?: boolean;
+  color?: string;
+}) {
+  return (
+    <div className="flex justify-between items-center">
+      <span className="text-slate-600">{label}</span>
+      <span className={`tabular-nums ${bold ? 'font-semibold' : ''} ${color ?? 'text-slate-800'}`}>
+        {value}
+      </span>
+    </div>
   );
 }
 

@@ -5,6 +5,23 @@ const PALETTE = [
   '#0891b2', '#ca8a04', '#be185d', '#0d9488', '#7c3aed',
 ];
 
+export interface ParseDiagnostics {
+  /** Всего "секций" встречено в файле (между --- или при смене значения). */
+  totalSections: number;
+  /** Секций, превратившихся в ломаную (≥ 2 точки). */
+  polylinesCreated: number;
+  /** Секций, отброшенных как слишком короткие (0 или 1 точка). */
+  sectionsDropped: number;
+  /** Подробности отброшенных секций — что именно потерялось. */
+  droppedSections: { value: number; pointCount: number; firstPoint?: Point }[];
+  /** Всего точек прочитано и положено в ломаные. */
+  pointsInPolylines: number;
+  /** Точек-sentinel'ов (value < -900) — данные пропущены. */
+  sentinelsSkipped: number;
+  /** Строк, не прошедших парсинг (меньше 3 токенов или NaN). */
+  malformedLines: number;
+}
+
 /**
  * Парсер формата руководителя:
  *   value X Y                — точка ломаной с подписью value
@@ -14,12 +31,35 @@ const PALETTE = [
  * Все точки в одной "секции" имеют одну и ту же подпись (значение изолинии).
  */
 export function parseLinesFile(content: string, opts: { flipY?: boolean } = {}): Polyline[] {
+  return parseLinesFileWithDiagnostics(content, opts).polylines;
+}
+
+/**
+ * То же, что parseLinesFile, но дополнительно возвращает счётчики того,
+ * сколько секций/строк было пропущено и почему — для UI-диагностики.
+ */
+export function parseLinesFileWithDiagnostics(
+  content: string,
+  opts: { flipY?: boolean } = {}
+): { polylines: Polyline[]; diagnostics: ParseDiagnostics } {
   const flipY = opts.flipY ?? true;
   const polylines: Polyline[] = [];
   let current: { value: number; points: Point[] } | null = null;
 
+  const diagnostics: ParseDiagnostics = {
+    totalSections: 0,
+    polylinesCreated: 0,
+    sectionsDropped: 0,
+    droppedSections: [],
+    pointsInPolylines: 0,
+    sentinelsSkipped: 0,
+    malformedLines: 0,
+  };
+
   const flush = () => {
-    if (current && current.points.length >= 2) {
+    if (!current) return;
+    diagnostics.totalSections++;
+    if (current.points.length >= 2) {
       polylines.push({
         id: `loaded-${polylines.length}-${Date.now()}`,
         points: current.points,
@@ -28,6 +68,15 @@ export function parseLinesFile(content: string, opts: { flipY?: boolean } = {}):
         step: 2,
         direction: 'forward',
         lineWidth: 1.5,
+      });
+      diagnostics.polylinesCreated++;
+      diagnostics.pointsInPolylines += current.points.length;
+    } else {
+      diagnostics.sectionsDropped++;
+      diagnostics.droppedSections.push({
+        value: current.value,
+        pointCount: current.points.length,
+        firstPoint: current.points[0],
       });
     }
     current = null;
@@ -40,15 +89,18 @@ export function parseLinesFile(content: string, opts: { flipY?: boolean } = {}):
     if (/^-{3,}/.test(line)) { flush(); continue; }
 
     const parts = line.split(/\s+/);
-    if (parts.length < 3) continue;
+    if (parts.length < 3) { diagnostics.malformedLines++; continue; }
 
     const value = parseFloat(parts[0]);
     const x = parseFloat(parts[1]);
     let y = parseFloat(parts[2]);
-    if (!isFinite(value) || !isFinite(x) || !isFinite(y)) continue;
+    if (!isFinite(value) || !isFinite(x) || !isFinite(y)) {
+      diagnostics.malformedLines++;
+      continue;
+    }
 
     // sentinel — пропускаем
-    if (value < -900) continue;
+    if (value < -900) { diagnostics.sentinelsSkipped++; continue; }
 
     if (flipY) y = -y;
 
@@ -59,7 +111,7 @@ export function parseLinesFile(content: string, opts: { flipY?: boolean } = {}):
   }
   flush();
 
-  return polylines;
+  return { polylines, diagnostics };
 }
 
 export interface BBox { minX: number; minY: number; maxX: number; maxY: number; }
